@@ -1,17 +1,18 @@
 package binloader
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"github.com/mholt/archiver"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/mholt/archives"
 )
 
 // Src defines executable source
@@ -22,6 +23,7 @@ type Src struct {
 	execPath string
 }
 
+// BinLoader downloads and extracts platform-specific binaries.
 type BinLoader struct {
 	src      []*Src
 	dest     string
@@ -84,7 +86,7 @@ func (b *BinLoader) Strip(value int) *BinLoader {
 
 // Path returns the full path to the binary
 func (b *BinLoader) Path() (string, error) {
-	if b.src != nil && len(b.src) > 0 {
+	if len(b.src) > 0 {
 		err := b.findExisting()
 
 		if err != nil {
@@ -147,7 +149,7 @@ func (b *BinLoader) download() error {
 	src := osFilterObj(b.src)
 
 	if src == nil {
-		return errors.New("No binary found matching your system. It's probably not supported")
+		return errors.New("no binary found matching your system, it's probably not supported")
 	}
 
 	file, err := b.downloadFile(src.url)
@@ -173,10 +175,29 @@ func (b *BinLoader) download() error {
 
 func (b *BinLoader) extractFile(file string) error {
 	defer os.Remove(file)
-	err := archiver.Unarchive(file, b.dest)
+
+	ctx := context.Background()
+
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	format, stream, err := archives.Identify(ctx, file, f)
+	if err != nil {
+		fmt.Printf("%s is not an archive or has unsupported archive format\n", file)
+		return err
+	}
+
+	extractor, ok := format.(archives.Extractor)
+	if !ok {
+		return fmt.Errorf("%s: format does not support extraction", file)
+	}
+
+	err = extractor.Extract(ctx, stream, b.handleExtractedFile)
 
 	if err != nil {
-		fmt.Printf("%s is not an archive or have unsupported archive format\n", file)
 		return err
 	}
 
@@ -187,41 +208,46 @@ func (b *BinLoader) extractFile(file string) error {
 	return b.stripDir()
 }
 
-func (b *BinLoader) stripDir() error {
-	dir := b.dest
+func (b *BinLoader) handleExtractedFile(_ context.Context, info archives.FileInfo) error {
+	destPath := filepath.Join(b.dest, filepath.Clean(info.NameInArchive))
 
-	var dirsToRemove []string
-
-	for i := 0; i < b.strip; i++ {
-		files, err := ioutil.ReadDir(dir)
-
-		if err != nil {
-			return err
-		}
-
-		for _, v := range files {
-			if v.IsDir() {
-
-				if dir != b.dest {
-					dirsToRemove = append(dirsToRemove, dir)
-				}
-
-				dir = filepath.Join(dir, v.Name())
-				break
-			}
-		}
+	if info.IsDir() {
+		return os.MkdirAll(destPath, 0755)
 	}
 
-	files, err := ioutil.ReadDir(dir)
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
 
+	srcReader, err := info.Open()
+	if err != nil {
+		return err
+	}
+	defer srcReader.Close()
+
+	destFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode()|0111)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, srcReader)
+	return err
+}
+
+func (b *BinLoader) stripDir() error {
+	dir, dirsToRemove, err := b.findStrippedDir()
+	if err != nil {
+		return err
+	}
+
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 
 	for _, v := range files {
-		err := os.Rename(filepath.Join(dir, v.Name()), filepath.Join(b.dest, v.Name()))
-
-		if err != nil {
+		if err := os.Rename(filepath.Join(dir, v.Name()), filepath.Join(b.dest, v.Name())); err != nil {
 			return err
 		}
 	}
@@ -231,6 +257,30 @@ func (b *BinLoader) stripDir() error {
 	}
 
 	return nil
+}
+
+func (b *BinLoader) findStrippedDir() (dir string, dirsToRemove []string, err error) {
+	dir = b.dest
+
+	for i := 0; i < b.strip; i++ {
+		var files []os.DirEntry
+		files, err = os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+
+		for _, v := range files {
+			if v.IsDir() {
+				if dir != b.dest {
+					dirsToRemove = append(dirsToRemove, dir)
+				}
+				dir = filepath.Join(dir, v.Name())
+				break
+			}
+		}
+	}
+
+	return
 }
 
 func (b *BinLoader) downloadFile(value string) (string, error) {
@@ -278,8 +328,8 @@ func (b *BinLoader) downloadFile(value string) (string, error) {
 
 	defer resp.Body.Close()
 
-	if !(resp.StatusCode >= 200 && resp.StatusCode < 400) {
-		return "", errors.New("Unable to download " + value)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return "", errors.New("unable to download " + value)
 	}
 
 	_, err = io.Copy(file, resp.Body)

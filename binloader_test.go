@@ -2,10 +2,13 @@ package binloader_test
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+
 	"github.com/nickalie/go-binloader"
 	"github.com/stretchr/testify/assert"
-	"os"
-	"testing"
 )
 
 func ExampleNewBinLoader() {
@@ -13,30 +16,30 @@ func ExampleNewBinLoader() {
 
 	bin := binloader.NewBinLoader().
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-mac-10.12.tar.gz").
-				Os("darwin")).
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-mac-arm64.tar.gz").
+				Os("darwin").
+				Arch("arm64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-linux-x86-32.tar.gz").
-				Os("linux").
-				Arch("x86")).
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-mac-x86-64.tar.gz").
+				Os("darwin").
+				Arch("x64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-linux-x86-64.tar.gz").
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-linux-x86-64.tar.gz").
 				Os("linux").
 				Arch("x64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-windows-x64.zip").
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-linux-aarch64.tar.gz").
+				Os("linux").
+				Arch("arm64")).
+		Src(
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-windows-x64.zip").
 				Os("win32").
 				Arch("x64").
-				ExecPath("cwebp.exe")).
-		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-windows-x86.zip").
-				Os("win32").
-				Arch("x86").
 				ExecPath("cwebp.exe")).
 		Strip(2).
 		Dest("vendor/cwebp").
@@ -53,29 +56,30 @@ func TestNewBinWrapperNoError(t *testing.T) {
 
 	bin := binloader.NewBinLoader().
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-mac-10.12.tar.gz").
-				Os("darwin")).
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-mac-arm64.tar.gz").
+				Os("darwin").
+				Arch("arm64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-linux-x86-32.tar.gz").
-				Os("linux").
-				Arch("x86")).
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-mac-x86-64.tar.gz").
+				Os("darwin").
+				Arch("x64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-linux-x86-64.tar.gz").
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-linux-x86-64.tar.gz").
 				Os("linux").
 				Arch("x64")).
 		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-windows-x64.zip").
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-linux-aarch64.tar.gz").
+				Os("linux").
+				Arch("arm64")).
+		Src(
+			binloader.NewSrc().
+				URL(base + "libwebp-1.6.0-windows-x64.zip").
 				Os("win32").
 				Arch("x64")).
-		Src(
-		binloader.NewSrc().
-				URL(base + "libwebp-0.6.0-windows-x86.zip").
-				Os("win32").
-				Arch("x86")).
 		Strip(2).
 		Dest("deps/cwebp").
 		ExecPath("cwebp").AutoExe()
@@ -84,4 +88,8 @@ func TestNewBinWrapperNoError(t *testing.T) {
 	assert.Nil(t, err)
 	_, err = os.Stat(file)
 	assert.Nil(t, err)
+
+	output, err := exec.Command(file, "-version").CombinedOutput()
+	assert.Nil(t, err)
+	assert.True(t, strings.Contains(string(output), "1.6.0"), "expected version 1.6.0 in output: %s", string(output))
 }

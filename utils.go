@@ -2,31 +2,15 @@ package binloader
 
 import (
 	"runtime"
+	"slices"
 )
 
 func osFilterObj(values []*Src) *Src {
-	arches := []string{runtime.GOARCH}
-
-	if runtime.GOARCH == "386" {
-		arches = append(arches,"x86")
-	} else if runtime.GOARCH == "amd64" {
-		arches = append(arches,"x64")
-	}
-
-	platforms := []string{runtime.GOOS}
-
-	if runtime.GOOS == "windows" {
-		platforms = append(platforms,"win32")
-	}
+	platforms := currentPlatforms()
+	arches := currentArches()
 
 	for _, v := range values {
-		if stringsContains(platforms, v.os) && stringsContains(arches, v.arch) {
-			return v
-		} else if stringsContains(platforms, v.os) && v.arch == "" {
-			return v
-		} else if stringsContains(arches, v.arch) && v.os == "" {
-			return v
-		} else if v.os == "" && v.arch == "" {
+		if matchesSrc(v, platforms, arches) {
 			return v
 		}
 	}
@@ -34,12 +18,29 @@ func osFilterObj(values []*Src) *Src {
 	return nil
 }
 
-func stringsContains(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
-		}
+func matchesSrc(v *Src, platforms, arches []string) bool {
+	matchOS := v.os == "" || slices.Contains(platforms, v.os)
+	matchArch := v.arch == "" || slices.Contains(arches, v.arch)
+	return matchOS && matchArch
+}
+
+func currentPlatforms() []string {
+	platforms := []string{runtime.GOOS}
+	if runtime.GOOS == "windows" {
+		platforms = append(platforms, "win32")
+	}
+	return platforms
+}
+
+func currentArches() []string {
+	arches := []string{runtime.GOARCH}
+
+	switch runtime.GOARCH {
+	case "386":
+		arches = append(arches, "x86")
+	case "amd64":
+		arches = append(arches, "x64")
 	}
 
-	return false
+	return arches
 }
