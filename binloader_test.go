@@ -2,8 +2,8 @@ package binloader_test
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -52,6 +52,7 @@ func ExampleNewBinLoader() {
 }
 
 func TestNewBinWrapperNoError(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "cwebp")
 	base := "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/"
 
 	bin := binloader.NewBinLoader().
@@ -81,12 +82,10 @@ func TestNewBinWrapperNoError(t *testing.T) {
 				Os("win32").
 				Arch("x64")).
 		Strip(2).
-		Dest("deps/cwebp").
+		Dest(dest).
 		ExecPath("cwebp").AutoExe()
 
 	file, err := bin.Path()
-	assert.Nil(t, err)
-	_, err = os.Stat(file)
 	assert.Nil(t, err)
 
 	output, err := exec.Command(file, "-version").CombinedOutput()

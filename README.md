@@ -6,6 +6,8 @@ A Go library for downloading and extracting platform-specific binaries. Automati
 
 ## Installation
 
+Requires Go 1.25 or later.
+
 ```bash
 go get github.com/nickalie/go-binloader
 ```
@@ -90,20 +92,20 @@ Downloads and extracts platform-specific binaries.
 | `ExecPath(execPath string)` | Name of the executable binary |
 | `Strip(value int)` | Strip leading path components from extracted files (like `tar --strip-components`) |
 | `AutoExe()` | Automatically append `.exe` on Windows |
-| `Path()` | Returns the full path to the binary, downloading if needed |
+| `Path()` | Returns the full path to the binary, downloading at most once per instance |
 
 All methods (except `Path`) return the receiver for chaining.
 
 ## How It Works
 
-1. `Path()` checks if the binary already exists at the destination
+1. `Path()` checks if the binary already exists at the destination (first call only)
 2. If not, it selects the matching `Src` for the current OS and architecture
 3. Downloads the archive from the URL
 4. Extracts the archive (supports tar.gz, zip, and other formats via [mholt/archives](https://github.com/mholt/archives))
 5. Optionally strips leading directory components
 6. Returns the path to the executable
 
-Subsequent calls to `Path()` skip the download if the binary already exists.
+The download/extraction is performed at most once per `BinLoader` instance. Subsequent calls to `Path()` return the cached result without re-checking the filesystem. Create a new `BinLoader` instance if you need to re-download.
 
 ## License
 

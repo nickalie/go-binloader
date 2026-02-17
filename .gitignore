@@ -10,3 +10,6 @@ deps/
 # OS
 .DS_Store
 Thumbs.db
+
+# ralphex progress logs
+.ralphex/progress/

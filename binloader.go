@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mholt/archives"
 )
@@ -30,6 +32,8 @@ type BinLoader struct {
 	execPath string
 	strip    int
 	autoExe  bool
+	mu       sync.Mutex
+	loaded   bool
 }
 
 // NewSrc creates new Src instance
@@ -84,31 +88,45 @@ func (b *BinLoader) Strip(value int) *BinLoader {
 	return b
 }
 
-// Path returns the full path to the binary
+// Path returns the full path to the binary.
+// It is safe for concurrent use; the download/extraction is performed at most once.
+// If the download fails with a transient error, subsequent calls will retry.
 func (b *BinLoader) Path() (string, error) {
 	if len(b.src) > 0 {
-		err := b.findExisting()
-
-		if err != nil {
-			return "", err
+		b.mu.Lock()
+		if !b.loaded {
+			err := b.findExisting()
+			if err != nil {
+				b.mu.Unlock()
+				return "", err
+			}
+			b.loaded = true
 		}
+		b.mu.Unlock()
 	}
 
 	return b.path(), nil
 }
 
 func (b *BinLoader) path() string {
-	src := osFilterObj(b.src)
+	execPath := b.execPath
 
+	src := osFilterObj(b.src)
 	if src != nil && src.execPath != "" {
-		b.ExecPath(src.execPath)
+		execPath = src.execPath
+		if b.autoExe && runtime.GOOS == "windows" {
+			ext := strings.ToLower(filepath.Ext(execPath))
+			if ext != ".exe" {
+				execPath += ".exe"
+			}
+		}
 	}
 
 	if b.dest == "." {
-		return b.dest + string(filepath.Separator) + b.execPath
+		return b.dest + string(filepath.Separator) + execPath
 	}
 
-	return filepath.Join(b.dest, b.execPath)
+	return filepath.Join(b.dest, execPath)
 }
 
 // ExecPath define a file to use as the binary
@@ -136,7 +154,6 @@ func (b *BinLoader) findExisting() error {
 	_, err := os.Stat(b.path())
 
 	if os.IsNotExist(err) {
-		fmt.Printf("%s not found. Downloading...\n", b.path())
 		return b.download()
 	} else if err != nil {
 		return err
@@ -157,8 +174,6 @@ func (b *BinLoader) download() error {
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("%s downloaded. Trying to extract...\n", file)
 
 	err = b.extractFile(file)
 
@@ -186,8 +201,7 @@ func (b *BinLoader) extractFile(file string) error {
 
 	format, stream, err := archives.Identify(ctx, file, f)
 	if err != nil {
-		fmt.Printf("%s is not an archive or has unsupported archive format\n", file)
-		return err
+		return fmt.Errorf("%s: failed to identify archive format: %w", file, err)
 	}
 
 	extractor, ok := format.(archives.Extractor)
@@ -208,8 +222,88 @@ func (b *BinLoader) extractFile(file string) error {
 	return b.stripDir()
 }
 
+func (b *BinLoader) safePath(nameInArchive string) (string, error) {
+	destPath := filepath.Join(b.dest, filepath.Clean(nameInArchive))
+
+	// Resolve the dest directory to its real path (following symlinks) so that
+	// the prefix check cannot be bypassed by symlinked path components.
+	absDest, err := filepath.Abs(b.dest)
+	if err != nil {
+		return "", err
+	}
+	if realDest, err := filepath.EvalSymlinks(absDest); err == nil {
+		absDest = realDest
+	}
+
+	absPath, err := filepath.Abs(destPath)
+	if err != nil {
+		return "", err
+	}
+	// Resolve the target path: if intermediate components are symlinks,
+	// the real path may fall outside the destination directory.
+	if realPath, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = realPath
+	} else {
+		// Parts of the path may not exist yet (we're about to create them).
+		// Walk up to find the deepest existing ancestor, resolve symlinks
+		// there, then re-append the non-existent remainder. This catches
+		// symlinks at any ancestor level, even when multiple child
+		// directories are missing.
+		resolved, resolveErr := resolveExistingPrefix(absPath)
+		if resolveErr != nil {
+			return "", fmt.Errorf("illegal file path in archive: %s: %w", nameInArchive, resolveErr)
+		}
+		absPath = resolved
+	}
+
+	if !strings.HasPrefix(absPath, absDest+string(filepath.Separator)) && absPath != absDest {
+		return "", fmt.Errorf("illegal file path in archive: %s", nameInArchive)
+	}
+
+	// Return the resolved absolute path rather than the original joined path.
+	// This narrows the TOCTOU window: an attacker would need to race between
+	// this return and the caller's use of the path. The gap cannot be fully
+	// closed without OS-level primitives (e.g. openat2 RESOLVE_NO_SYMLINKS).
+	return absPath, nil
+}
+
+// resolveExistingPrefix walks up from path to find the deepest existing
+// ancestor, resolves symlinks on that ancestor, and re-appends the
+// remaining (non-existent) components. This ensures symlinks at any level
+// of the path are detected, even when deeper components don't yet exist.
+// Returns an error if a dangling symlink is encountered (Lstat succeeds
+// but EvalSymlinks fails), which would indicate a potential path traversal.
+func resolveExistingPrefix(path string) (string, error) {
+	dir := path
+	var remaining []string
+	for {
+		_, err := os.Lstat(dir)
+		if err == nil {
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return "", fmt.Errorf("dangling symlink in path: %s: %w", dir, err)
+			}
+			parts := append([]string{resolved}, remaining...)
+			return filepath.Join(parts...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot access path %s: %w", dir, err)
+		}
+		remaining = append([]string{filepath.Base(dir)}, remaining...)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return path, nil
+}
+
 func (b *BinLoader) handleExtractedFile(_ context.Context, info archives.FileInfo) error {
-	destPath := filepath.Join(b.dest, filepath.Clean(info.NameInArchive))
+	destPath, err := b.safePath(info.NameInArchive)
+	if err != nil {
+		return err
+	}
 
 	if info.IsDir() {
 		return os.MkdirAll(destPath, 0755)
@@ -225,14 +319,17 @@ func (b *BinLoader) handleExtractedFile(_ context.Context, info archives.FileInf
 	}
 	defer srcReader.Close()
 
-	destFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode()|0111)
+	destFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
 
-	_, err = io.Copy(destFile, srcReader)
-	return err
+	_, copyErr := io.Copy(destFile, srcReader)
+	closeErr := destFile.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func (b *BinLoader) stripDir() error {
@@ -253,7 +350,9 @@ func (b *BinLoader) stripDir() error {
 	}
 
 	for _, v := range dirsToRemove {
-		os.RemoveAll(v)
+		if err := os.RemoveAll(v); err != nil {
+			return fmt.Errorf("failed to clean up directory %s: %w", v, err)
+		}
 	}
 
 	return nil
@@ -269,18 +368,67 @@ func (b *BinLoader) findStrippedDir() (dir string, dirsToRemove []string, err er
 			return
 		}
 
+		nextDir := ""
 		for _, v := range files {
-			if v.IsDir() {
-				if dir != b.dest {
-					dirsToRemove = append(dirsToRemove, dir)
-				}
-				dir = filepath.Join(dir, v.Name())
-				break
+			if !v.IsDir() {
+				continue
 			}
+			nextDir = filepath.Join(dir, v.Name())
+			dirsToRemove = append(dirsToRemove, nextDir)
+			dir = nextDir
+			break
+		}
+
+		if nextDir == "" {
+			err = fmt.Errorf("strip level %d: no subdirectory found in %s", i+1, dir)
+			return
 		}
 	}
 
 	return
+}
+
+func fileNameFromURL(rawURL string) (string, error) {
+	fileURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	if fileURL.Scheme != "http" && fileURL.Scheme != "https" {
+		return "", fmt.Errorf("unsupported URL scheme: %s", fileURL.Scheme)
+	}
+
+	name := filepath.Base(fileURL.Path)
+	if name == "" || name == "." || name == "/" {
+		return "", fmt.Errorf("could not determine filename from URL: %s", rawURL)
+	}
+
+	return name, nil
+}
+
+func writeToFile(fileName string, r io.Reader) error {
+	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+
+	_, copyErr := io.Copy(file, r)
+	closeErr := file.Close()
+	if copyErr != nil {
+		os.Remove(fileName)
+		return copyErr
+	}
+	if closeErr != nil {
+		os.Remove(fileName)
+		return closeErr
+	}
+
+	return nil
+}
+
+// httpClient is the HTTP client used for downloads, with a default timeout.
+var httpClient = &http.Client{
+	Timeout: 5 * time.Minute,
 }
 
 func (b *BinLoader) downloadFile(value string) (string, error) {
@@ -288,51 +436,25 @@ func (b *BinLoader) downloadFile(value string) (string, error) {
 		b.dest = "."
 	}
 
-	err := os.MkdirAll(b.dest, 0755)
-
-	if err != nil {
+	if err := os.MkdirAll(b.dest, 0755); err != nil {
 		return "", err
 	}
 
-	fileURL, err := url.Parse(value)
-
+	name, err := fileNameFromURL(value)
 	if err != nil {
 		return "", err
 	}
+	fileName := filepath.Join(b.dest, name)
 
-	path := fileURL.Path
-
-	segments := strings.Split(path, "/")
-	fileName := segments[len(segments)-1]
-	fileName = filepath.Join(b.dest, fileName)
-	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
-
+	resp, err := httpClient.Get(value)
 	if err != nil {
 		return "", err
 	}
-
-	defer file.Close()
-
-	check := http.Client{
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			r.URL.Opaque = r.URL.Path
-			return nil
-		},
-	}
-
-	resp, err := check.Get(value)
-
-	if err != nil {
-		return "", err
-	}
-
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return "", errors.New("unable to download " + value)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("unable to download %s: HTTP %d", value, resp.StatusCode)
 	}
 
-	_, err = io.Copy(file, resp.Body)
-
-	return fileName, err
+	return fileName, writeToFile(fileName, resp.Body)
 }
